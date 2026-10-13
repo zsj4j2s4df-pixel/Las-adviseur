@@ -1,0 +1,1 @@
+{"name":"lashulp-stt-bridge","private":true,"type":"module","scripts":{"start":"node index.js"},"dependencies":{"@google-cloud/speech":"^6.7.0","ws":"^8.18.0"}}

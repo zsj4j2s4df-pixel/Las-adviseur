@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+_worker.bundle
+*.tsbuildinfo
+cloud-run/stt-bridge/.env
