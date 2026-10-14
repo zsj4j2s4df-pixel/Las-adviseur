@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "las-adviseur",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-11",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lashulp-db",
+      "database_id": "1d07875e-40cc-4f9b-bacb-b93d01806459"
+    }
+  ]
+}
