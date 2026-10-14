@@ -1,0 +1,15 @@
+{
+  "name": "Lashulp — TIG en MIG/MAG",
+  "short_name": "Lashulp",
+  "description": "Praktische, handsfree hulp aan de laswerkbank.",
+  "lang": "nl-NL",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f3f4f1",
+  "theme_color": "#216a51",
+  "icons": [
+    { "src": "/lashulp-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
