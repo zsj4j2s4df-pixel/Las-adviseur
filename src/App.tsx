@@ -43,6 +43,7 @@ export default function App() {
   const liveStreamRef=useRef<MediaStream|null>(null);
   const liveAudioRef=useRef<HTMLAudioElement|null>(null);
   const liveCloseTimerRef=useRef<number|undefined>(undefined);
+  const liveStartTimerRef=useRef<number|undefined>(undefined);
   const liveCloseRequestedRef=useRef(false);
   const draftRef=useRef('');
   useEffect(()=>{draftRef.current=draft},[draft]);
@@ -123,6 +124,7 @@ export default function App() {
   function cleanupLive() {
     liveCloseRequestedRef.current=false;
     window.clearTimeout(liveCloseTimerRef.current);
+    window.clearTimeout(liveStartTimerRef.current);
     liveStreamRef.current?.getTracks().forEach(track=>track.stop()); liveStreamRef.current=null;
     liveEventsRef.current?.close(); liveEventsRef.current=null;
     livePeerRef.current?.close(); livePeerRef.current=null;
@@ -146,7 +148,7 @@ export default function App() {
       const audio=new Audio();audio.autoplay=true;audio.setAttribute('playsinline','');liveAudioRef.current=audio;
       peer.addEventListener('track',event=>{audio.srcObject=event.streams[0]||new MediaStream([event.track]);void audio.play().catch(()=>setError('Tik op het afspeelscherm van je apparaat om de stem te horen.'))});
       const events=peer.createDataChannel('oai-events');liveEventsRef.current=events;
-      events.addEventListener('message',event=>{try{const item=JSON.parse(event.data);if(item.type==='session.started')setLiveState('connected');if(item.type==='session.closed')cleanupLive();if(item.type==='error')setError('GPT Live heeft de verbinding onderbroken.')}catch{}});
+      events.addEventListener('message',event=>{try{const item=JSON.parse(event.data);if(item.type==='session.started'){window.clearTimeout(liveStartTimerRef.current);liveStartTimerRef.current=undefined;setLiveState('connected');}if(item.type==='session.closed')cleanupLive();if(item.type==='error')setError('GPT Live heeft de verbinding onderbroken.')}catch{}});
       events.addEventListener('close',()=>{if(!liveCloseRequestedRef.current){setError('De GPT-Live-verbinding is verbroken. Start opnieuw.');cleanupLive()}});
       peer.addEventListener('connectionstatechange',()=>{if(peer.connectionState==='failed'){setError('De GPT-Live-verbinding is verbroken. Start opnieuw.');cleanupLive()}});
       const offer=await peer.createOffer();await peer.setLocalDescription(offer);
@@ -154,7 +156,8 @@ export default function App() {
       const response=await getJSON('/api/live-session',{method:'POST',body:JSON.stringify({world,sdp:peer.localDescription?.sdp})});
       if(typeof response?.transport?.sdp!=='string')throw new Error('OpenAI gaf geen geldige Live-verbinding terug.');
       await peer.setRemoteDescription({type:'answer',sdp:response.transport.sdp});
-    } catch(e) { cleanupLive();setError(e instanceof Error?e.message:'GPT Live kon niet starten.'); }
+      liveStartTimerRef.current=window.setTimeout(()=>{cleanupLive();setError('GPT Live heeft niet op tijd bevestigd dat de verbinding klaar is. Probeer het opnieuw.');},30_000);
+    } catch(e) { cleanupLive();const error=e instanceof Error?e:new Error('GPT Live kon niet starten.');const name=(e as {name?:string}|null)?.name;setError(name==='NotFoundError'?'Er is geen microfoon beschikbaar in deze browser. Sluit een microfoon aan of kies een audio-invoerapparaat en probeer opnieuw.':name==='NotAllowedError'?'Microfoontoegang is geblokkeerd. Sta microfoontoegang toe voor deze website en probeer opnieuw.':error.message||'GPT Live kon niet starten.'); }
   }
   async function installApp(){if(!installPrompt)return;await installPrompt.prompt();setInstallPrompt(null)}
   async function loadItems(){ try{const d=await getJSON(`/api/inventory?world=${world}`);setItems(d.items||[])}catch(e){setError((e as Error).message)} }
