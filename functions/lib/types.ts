@@ -2,6 +2,7 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   OPENAI_API_KEY: string;
+  OPENAI_REALTIME_MODEL?: string;
   OPENAI_MODEL?: string;
   GOOGLE_SERVICE_ACCOUNT_JSON?: string;
   STT_BRIDGE_URL?: string;
