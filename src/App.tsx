@@ -3,6 +3,7 @@ type World = 'tig'|'migmag';
 type Message = { role: 'user'|'assistant'; content: string; spoken?: string };
 type Item = { id: string; world: string; category: string; name: string; spec: string; notes: string; available: number };
 type Trial = { id: string; world: World; material: string; thickness: string; joint: string; fitup: string; result: string; settings: string; created_at: string };
+type LiveState = 'idle'|'connecting'|'connected'|'closing';
 const firstMessage: Message = { role:'assistant', content:'Ik help je met een praktische startinstelling. Vertel wat je gaat lassen: materiaal, dikte en verbinding. Als je het al weet: passing, gewenste afwerking en welk toevoegmateriaal er klaar ligt.' };
 const categories = ['Materiaal','Toevoegmateriaal / draad','Wolfraam','Gas','Machine','Toorts','Werkplaats / veiligheid','Overig'];
 const categoryByWorld: Record<World,string[]> = { tig:categories, migmag:categories.filter(x=>x!=='Wolfraam') };
@@ -20,6 +21,8 @@ export default function App() {
   const [error,setError]=useState('');
   const [busySpeak,setBusySpeak]=useState(false);
   const [listening,setListening]=useState(false);
+  const [liveState,setLiveState]=useState<LiveState>('idle');
+  const [installPrompt,setInstallPrompt]=useState<any>(null);
   const [continuous,setContinuous]=useState(false);
   const [partial,setPartial]=useState('');
   const [budgetWarning,setBudgetWarning]=useState(false);
@@ -35,11 +38,18 @@ export default function App() {
   const streamRef=useRef<MediaStream|null>(null);
   const audioContextRef=useRef<AudioContext|null>(null);
   const processorRef=useRef<ScriptProcessorNode|null>(null);
+  const livePeerRef=useRef<RTCPeerConnection|null>(null);
+  const liveEventsRef=useRef<RTCDataChannel|null>(null);
+  const liveStreamRef=useRef<MediaStream|null>(null);
+  const liveAudioRef=useRef<HTMLAudioElement|null>(null);
+  const liveCloseTimerRef=useRef<number|undefined>(undefined);
+  const liveCloseRequestedRef=useRef(false);
   const draftRef=useRef('');
   useEffect(()=>{draftRef.current=draft},[draft]);
   useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:'smooth',block:'end'})},[messages,loading,partial]);
   useEffect(()=>{ if(tab==='beheer') void loadItems(); if(tab==='proeven') void loadTrials(); },[tab,world]);
-  useEffect(()=>()=>{ stopListening(); stopSpeech(); },[]);
+  useEffect(()=>{const handler=(event:Event)=>{event.preventDefault();setInstallPrompt(event)};window.addEventListener('beforeinstallprompt',handler);return()=>window.removeEventListener('beforeinstallprompt',handler)},[]);
+  useEffect(()=>()=>{ stopListening(); stopSpeech(); cleanupLive(); },[]);
 
   function updateMessages(next:Message[]|((old:Message[])=>Message[])) { setThreads(prev=>({...prev,[world]:typeof next==='function'?next(prev[world]):next})); }
   async function speak(text:string) {
@@ -110,6 +120,43 @@ export default function App() {
     if(socketRef.current){socketRef.current.onclose=null;socketRef.current.close();socketRef.current=null;}
     setListening(false);setPartial('');
   }
+  function cleanupLive() {
+    liveCloseRequestedRef.current=false;
+    window.clearTimeout(liveCloseTimerRef.current);
+    liveStreamRef.current?.getTracks().forEach(track=>track.stop()); liveStreamRef.current=null;
+    liveEventsRef.current?.close(); liveEventsRef.current=null;
+    livePeerRef.current?.close(); livePeerRef.current=null;
+    if(liveAudioRef.current) liveAudioRef.current.srcObject=null;
+    setLiveState('idle');
+  }
+  async function toggleLive() {
+    if(liveState==='connected') {
+      const events=liveEventsRef.current;
+      if(events?.readyState==='open') { liveCloseRequestedRef.current=true;setLiveState('closing'); events.send(JSON.stringify({type:'session.close'})); liveCloseTimerRef.current=window.setTimeout(()=>cleanupLive(),15_000); }
+      else cleanupLive();
+      return;
+    }
+    if(liveState!=='idle') return;
+    setLiveState('connecting');setError('');stopListening();stopSpeech();
+    try {
+      if(!navigator.mediaDevices?.getUserMedia) throw new Error('Microfoon niet beschikbaar. Open Lashulp via HTTPS en geef microfoontoegang.');
+      const peer=new RTCPeerConnection();livePeerRef.current=peer;
+      const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});liveStreamRef.current=stream;
+      for(const track of stream.getAudioTracks()) peer.addTrack(track,stream);
+      const audio=new Audio();audio.autoplay=true;audio.setAttribute('playsinline','');liveAudioRef.current=audio;
+      peer.addEventListener('track',event=>{audio.srcObject=event.streams[0]||new MediaStream([event.track]);void audio.play().catch(()=>setError('Tik op het afspeelscherm van je apparaat om de stem te horen.'))});
+      const events=peer.createDataChannel('oai-events');liveEventsRef.current=events;
+      events.addEventListener('message',event=>{try{const item=JSON.parse(event.data);if(item.type==='session.started')setLiveState('connected');if(item.type==='session.closed')cleanupLive();if(item.type==='error')setError('GPT Live heeft de verbinding onderbroken.')}catch{}});
+      events.addEventListener('close',()=>{if(!liveCloseRequestedRef.current){setError('De GPT-Live-verbinding is verbroken. Start opnieuw.');cleanupLive()}});
+      peer.addEventListener('connectionstatechange',()=>{if(peer.connectionState==='failed'){setError('De GPT-Live-verbinding is verbroken. Start opnieuw.');cleanupLive()}});
+      const offer=await peer.createOffer();await peer.setLocalDescription(offer);
+      if(peer.iceGatheringState!=='complete') await new Promise<void>((resolve,reject)=>{const timer=window.setTimeout(()=>{peer.removeEventListener('icegatheringstatechange',onState);reject(new Error('De beveiligde spraakverbinding duurde te lang. Probeer opnieuw.'))},10_000);function onState(){if(peer.iceGatheringState==='complete'){window.clearTimeout(timer);peer.removeEventListener('icegatheringstatechange',onState);resolve()}}peer.addEventListener('icegatheringstatechange',onState);onState()});
+      const response=await getJSON('/api/live-session',{method:'POST',body:JSON.stringify({world,sdp:peer.localDescription?.sdp})});
+      if(typeof response?.transport?.sdp!=='string')throw new Error('OpenAI gaf geen geldige Live-verbinding terug.');
+      await peer.setRemoteDescription({type:'answer',sdp:response.transport.sdp});
+    } catch(e) { cleanupLive();setError(e instanceof Error?e.message:'GPT Live kon niet starten.'); }
+  }
+  async function installApp(){if(!installPrompt)return;await installPrompt.prompt();setInstallPrompt(null)}
   async function loadItems(){ try{const d=await getJSON(`/api/inventory?world=${world}`);setItems(d.items||[])}catch(e){setError((e as Error).message)} }
   async function loadTrials(){ try{const d=await getJSON(`/api/trials?world=${world}`);setTrials(d.trials||[])}catch(e){setError((e as Error).message)} }
   function resetItem(){setEditId('');setForm({world,category:'Materiaal',name:'',spec:'',notes:'',available:true})}
@@ -120,9 +167,9 @@ export default function App() {
   function addPhoto(file?:File){if(!file)return;if(file.size>5*1024*1024){setError('De foto mag maximaal 5 MB zijn.');return;}if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setError('Kies een JPG-, PNG- of WebP-foto.');return;}setImage(file);setError('')}
 
   return <div className="shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark">L</span><div><strong>Lashulp</strong><small>Praktische hulp aan de werkbank</small></div></div><div className="machine-pill"><span className="status-dot"/> {world==='tig'?'MagicWave 3000 AC/DC':'TransPuls Synergic 4000'}</div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">L</span><div><strong>Lashulp</strong><small>Praktische hulp aan de werkbank</small></div></div><div className="topbar-tools">{installPrompt&&<button className="install-button" onClick={()=>void installApp()}>Installeer Lashulp</button>}<div className="machine-pill"><span className="status-dot"/> {world==='tig'?'MagicWave 3000 AC/DC':'TransPuls Synergic 4000'}</div></div></header>
     <main className="main">
-      <div className="world-switch" role="tablist" aria-label="Kies lasproces"><button className={world==='tig'?'selected':''} onClick={()=>{stopListening();setWorld('tig')}}>TIG <span>MagicWave</span></button><button className={world==='migmag'?'selected':''} onClick={()=>{stopListening();setWorld('migmag')}}>MIG/MAG <span>TransPuls</span></button></div>
+      <div className="world-switch" role="tablist" aria-label="Kies lasproces"><button className={world==='tig'?'selected':''} onClick={()=>{stopListening();if(liveState==='connected')void toggleLive();setWorld('tig')}}>TIG <span>MagicWave</span></button><button className={world==='migmag'?'selected':''} onClick={()=>{stopListening();if(liveState==='connected')void toggleLive();setWorld('migmag')}}>MIG/MAG <span>TransPuls</span></button></div>
       <nav className="tabs"><button className={tab==='advies'?'active':''} onClick={()=>setTab('advies')}>Advies</button><button className={tab==='beheer'?'active':''} onClick={()=>setTab('beheer')}>Werkplaatsbeheer</button><button className={tab==='proeven'?'active':''} onClick={()=>setTab('proeven')}>Mijn proeven</button><span className="shared-note">Gedeeld met collega's</span></nav>
       {error&&<div className="alert error" role="alert">{error}<button onClick={()=>setError('')} aria-label="Melding sluiten">×</button></div>}
       {budgetWarning&&<div className="alert warning">De ingestelde dagelijkse AI-budgetwaarschuwing is bereikt. Controleer het verbruik in Cloudflare/ OpenAI.</div>}
@@ -135,8 +182,8 @@ export default function App() {
         <form className="composer" onSubmit={sendMessage}>
           {image&&<div className="attachment">📷 {image.name}<button type="button" onClick={()=>setImage(null)}>Verwijder</button></div>}
           <textarea value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void sendMessage()}}} placeholder="Typ je vraag of spreek…" rows={2} aria-label="Je vraag"/>
-          <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button" onClick={()=>document.getElementById('photo-input')?.click()} aria-label="Voeg foto toe">＋ Foto</button><input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={e=>addPhoto(e.target.files?.[0])}/><label className="continuous"><input type="checkbox" checked={continuous} onChange={e=>setContinuous(e.target.checked)}/> Continu luisteren</label></div><div className="composer-actions"><button type="button" onClick={()=>busySpeak?stopSpeech():void speak([...messages].reverse().find(m=>m.role==='assistant')?.spoken||'')} className={`listen-button ${busySpeak?'speaking':''}`} aria-label={busySpeak?'Stop voorlezen':'Herhaal antwoord'}>{busySpeak?'■':'◖))'}</button><button type="button" onClick={()=>void startListening()} className={`mic-button ${listening?'recording':''}`} aria-pressed={listening}><span>{listening?'■':'●'}</span>{listening?'Stop':'Praten'}</button><button type="submit" className="send-button" disabled={!draft.trim()||loading}>Verstuur <span>↑</span></button></div></div>
-          {listening&&<div className="live-status"><span className="record-dot"/>{partial?'Herkenning wordt bijgewerkt…':'Luistert — tik op Stop als je klaar bent'}</div>}
+          <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button" onClick={()=>document.getElementById('photo-input')?.click()} aria-label="Voeg foto toe">＋ Foto</button><input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={e=>addPhoto(e.target.files?.[0])}/><label className="continuous"><input type="checkbox" checked={continuous} onChange={e=>setContinuous(e.target.checked)}/> Continu luisteren</label></div><div className="composer-actions"><button type="button" onClick={()=>void startListening()} className={`mic-button ${listening?'recording':''}`} aria-pressed={listening} disabled={liveState!=='idle'}><span>{listening?'■':'●'}</span>{listening?'Stop':'Dicteren'}</button><button type="button" onClick={()=>void toggleLive()} className={`live-button ${liveState==='connected'?'live-active':''}`} aria-pressed={liveState==='connected'} disabled={liveState==='connecting'||liveState==='closing'}><span>{liveState==='connected'?'■':'◉'}</span>{liveState==='connected'?'Stop Live':liveState==='connecting'?'Verbinden…':liveState==='closing'?'Afronden…':'GPT Live'}</button><button type="submit" className="send-button" disabled={!draft.trim()||loading}>Verstuur <span>↑</span></button></div></div>
+          {listening&&<div className="live-status"><span className="record-dot"/>{partial?'Herkenning wordt bijgewerkt…':'Luistert — tik op Stop als je klaar bent'}</div>}{liveState!=='idle'&&<div className="live-status"><span className="record-dot"/>{liveState==='connecting'?'GPT Live wordt gestart — microfoon wordt verbonden…':liveState==='closing'?'Gesprek wordt netjes afgesloten…':'GPT Live luistert en antwoordt hardop — tik op Stop Live om af te sluiten.'}</div>}
         </form>
         <div className="privacy-note">Lashulp bewaart gesprekken en foto’s niet. Deel geen persoonsgegevens; je vraag wordt door OpenAI verwerkt.</div>
       </section>}
