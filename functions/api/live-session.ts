@@ -1,4 +1,3 @@
-Warning: fs was declared with const; use let for reassignable variables.
 import { json } from '../lib/http';
 import { rateAllowed } from '../lib/rate';
 import type { Data } from '../lib/types';
