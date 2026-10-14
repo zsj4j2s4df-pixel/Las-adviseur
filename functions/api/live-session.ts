@@ -7,7 +7,6 @@ export async function onRequestPost({ request, env }: Data) {
   if (request.headers.get('origin') !== new URL(request.url).origin) {
     return json({ error: 'Dit verzoek komt niet van Lashulp.' }, 403);
   }
-  if (!rateAllowed(request, 6)) return json({ error: 'Er zijn te veel live-sessies gestart. Probeer het later opnieuw.' }, 429);
   if (!env.OPENAI_API_KEY) return json({ error: 'OpenAI is nog niet ingesteld in Cloudflare.' }, 503);
   const length = Number(request.headers.get('content-length') || 0);
   if (length > 120_000) return json({ error: 'Het live-verzoek is te groot.' }, 413);
